@@ -1,27 +1,26 @@
-from flask import Flask, request, jsonify
-import json
-# start a web server
-
-from os import listdir, path
-import numpy as np
-import scipy, cv2, os, sys, argparse, audio
-import json, subprocess, random, string
-from tqdm import tqdm
-from glob import glob
-import torch, face_detection
-from models import Wav2Lip
+from flask import Flask, request, jsonify, send_from_directory
+import os
+import cv2
+import subprocess
 import platform
-
+import numpy as np
+import torch
+import requests
+from tqdm import tqdm
+from models import Wav2Lip
+from datetime import datetime
+import uuid
+import shutil
+import audio  # Импортируем модуль audio
+import face_detection  # Импортируем модуль face_detection
 
 app = Flask(__name__)
 
-
 class Args:
     def __init__(self):
-        self.checkpoint_path = "checkpoints/wav2lip.pth"
+        self.checkpoint_path = "checkpoints/wav2lip_gan.pth"
         self.face = ""
-        self.audio = "audio"
-        self.outfile = 'results/result_voice.mp4'
+        self.audio = ""
         self.static = False
         self.fps = 25.
         self.pads = [0, 10, 0, 0]
@@ -37,13 +36,12 @@ class Args:
 args = Args()
 
 global model
-model_path ="checkpoints/wav2lip.pth"
+model_path = "checkpoints/wav2lip_gan.pth"
 
 if os.path.isfile(args.face) and args.face.split('.')[1] in ['jpg', 'png', 'jpeg']:
     args.static = True
 
 def get_smoothened_boxes(boxes, T):
-    global model
     for i in range(len(boxes)):
         if i + T > len(boxes):
             window = boxes[len(boxes) - T:]
@@ -52,14 +50,9 @@ def get_smoothened_boxes(boxes, T):
         boxes[i] = np.mean(window, axis=0)
     return boxes
 
-
 def face_detect(images):
-    global model
-    detector = face_detection.FaceAlignment(face_detection.LandmarksType._2D,
-                                            flip_input=False, device=device)
-
+    detector = face_detection.FaceAlignment(face_detection.LandmarksType._2D, flip_input=False, device=device)
     batch_size = args.face_det_batch_size
-
     while 1:
         predictions = []
         try:
@@ -67,8 +60,7 @@ def face_detect(images):
                 predictions.extend(detector.get_detections_for_batch(np.array(images[i:i + batch_size])))
         except RuntimeError:
             if batch_size == 1:
-                raise RuntimeError(
-                    'Image too big to run face detection on GPU. Please use the --resize_factor argument')
+                raise RuntimeError('Image too big to run face detection on GPU. Please use the --resize_factor argument')
             batch_size //= 2
             print('Recovering from OOM error; New batch size: {}'.format(batch_size))
             continue
@@ -76,16 +68,13 @@ def face_detect(images):
 
     results = []
     pady1, pady2, padx1, padx2 = args.pads
-    fnr = 0
-    x1 = 0
-    y1 = 0
-    x2 = 100
-    y2 = 100
     for rect, image in zip(predictions, images):
         if rect is None:
-            cv2.imwrite('temp/faulty_frame.jpg', image)  # check this frame where the face was not detected.
-            print(f'Face not detected in {fnr}! Ensure the video contains a face in all the frames.')
-        # raise ValueError('Face not detected! Ensure the video contains a face in all the frames.')
+            temp_dir = os.path.join("temp", str(uuid.uuid4()))
+            os.makedirs(temp_dir, exist_ok=True)
+            faulty_frame_path = os.path.join(temp_dir, 'faulty_frame.jpg')
+            cv2.imwrite(faulty_frame_path, image)
+            print('Face not detected! Ensure the video contains a face in all the frames.')
         else:
             y1 = max(0, rect[1] - pady1)
             y2 = min(image.shape[0], rect[3] + pady2)
@@ -93,7 +82,6 @@ def face_detect(images):
             x2 = min(image.shape[1], rect[2] + padx2)
 
         results.append([x1, y1, x2, y2])
-        fnr = fnr + 1
 
     boxes = np.array(results)
     if not args.nosmooth: boxes = get_smoothened_boxes(boxes, T=5)
@@ -102,14 +90,12 @@ def face_detect(images):
     del detector
     return results
 
-
 def datagen(frames, mels):
-    global model
     img_batch, mel_batch, frame_batch, coords_batch = [], [], [], []
 
     if args.box[0] == -1:
         if not args.static:
-            face_det_results = face_detect(frames)  # BGR2RGB for CNN face detection
+            face_det_results = face_detect(frames)
         else:
             face_det_results = face_detect([frames[0]])
     else:
@@ -152,21 +138,16 @@ def datagen(frames, mels):
 
         yield img_batch, mel_batch, frame_batch, coords_batch
 
-
 mel_step_size = 16
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 print('Using {} for inference.'.format(device))
 
-
 def _load(checkpoint_path):
-    global model
     if device == 'cuda':
         checkpoint = torch.load(checkpoint_path)
     else:
-        checkpoint = torch.load(checkpoint_path,
-                                map_location=lambda storage, loc: storage)
+        checkpoint = torch.load(checkpoint_path, map_location=lambda storage, loc: storage)
     return checkpoint
-
 
 def load_model(path):
     global model
@@ -178,12 +159,10 @@ def load_model(path):
     for k, v in s.items():
         new_s[k.replace('module.', '')] = v
     model.load_state_dict(new_s)
-
     model = model.to(device)
     return model.eval()
 
-
-def main():
+def main(temp_dir):
     global model
     if not os.path.isfile(args.face):
         raise ValueError('--face argument must be a valid path to video/image file')
@@ -208,7 +187,7 @@ def main():
                 frame = cv2.resize(frame, (frame.shape[1] // args.resize_factor, frame.shape[0] // args.resize_factor))
 
             if args.rotate:
-                frame = cv2.rotate(frame, cv2.cv2.ROTATE_90_CLOCKWISE)
+                frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
 
             y1, y2, x1, x2 = args.crop
             if x2 == -1: x2 = frame.shape[1]
@@ -220,12 +199,14 @@ def main():
 
     print("Number of frames available for inference: " + str(len(full_frames)))
 
+    temp_audio_path = os.path.join(temp_dir, "temp.wav")
+    temp_video_path = os.path.join(temp_dir, "result.avi")
+
     if not args.audio.endswith('.wav'):
         print('Extracting raw audio...')
-        command = 'ffmpeg -y -i {} -strict -2 {}'.format(args.audio, 'temp/temp.wav')
-
+        command = f'ffmpeg -y -i {args.audio} -strict -2 {temp_audio_path}'
         subprocess.call(command, shell=True)
-        args.audio = 'temp/temp.wav'
+        args.audio = temp_audio_path
 
     wav = audio.load_wav(args.audio, 16000)
     mel = audio.melspectrogram(wav)
@@ -252,14 +233,10 @@ def main():
     batch_size = args.wav2lip_batch_size
     gen = datagen(full_frames.copy(), mel_chunks)
 
-    for i, (img_batch, mel_batch, frames, coords) in enumerate(tqdm(gen,
-                                                                    total=int(
-                                                                        np.ceil(float(len(mel_chunks)) / batch_size)))):
+    for i, (img_batch, mel_batch, frames, coords) in enumerate(tqdm(gen, total=int(np.ceil(float(len(mel_chunks)) / batch_size)))):
         if i == 0:
-
             frame_h, frame_w = full_frames[0].shape[:-1]
-            out = cv2.VideoWriter('temp/result.avi',
-                                  cv2.VideoWriter_fourcc(*'DIVX'), fps, (frame_w, frame_h))
+            out = cv2.VideoWriter(temp_video_path, cv2.VideoWriter_fourcc(*'DIVX'), fps, (frame_w, frame_h))
 
         img_batch = torch.FloatTensor(np.transpose(img_batch, (0, 3, 1, 2))).to(device)
         mel_batch = torch.FloatTensor(np.transpose(mel_batch, (0, 3, 1, 2))).to(device)
@@ -278,25 +255,55 @@ def main():
 
     out.release()
 
-    command = 'ffmpeg -y -i {} -i {} -strict -2 -q:v 1 {}'.format(args.audio, 'temp/result.avi', args.outfile)
+    unique_outfile = f'results/result_voice_{uuid.uuid4().hex}.mp4'
+    command = f'ffmpeg -y -i {args.audio} -i {temp_video_path} -strict -2 -q:v 1 {unique_outfile}'
     subprocess.call(command, shell=platform.system() != 'Windows')
 
+    shutil.rmtree(temp_dir)
+
+    return unique_outfile
 
 @app.route('/synthesize', methods=['POST'])
 def synthesize():
     global model
     try:
-        req = request.get_json(force=True)  # force=True, ignore mimetype and always try to parse JSON
+        req = request.get_json(force=True)
         if args.checkpoint_path != req.get('checkpoint_path', ''):
             args.checkpoint_path = req.get('checkpoint_path', '')
             model = load_model(args.checkpoint_path)
         args.face = req.get('face', '')
-        args.audio = req.get('audio', '')
-        args.outfile = req.get('outfile', 'results/result_voice.mp4')
+        text = req.get('text', '')
+        if not text:
+            raise ValueError('No text')
 
-        # calling the main function or the function containing your logic
-        main()
-        response = {"status": "success"}
+        # Отправить текст в API от Elevenlabs и получить MP3
+        elevenlabs_url = "https://api.elevenlabs.io/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM"
+        headers = {
+            "Accept": "audio/mpeg",
+            "Content-Type": "application/json",
+            "xi-api-key": "c5060e76784844cbc5aecdcb1369f70e"
+        }
+        data = {
+            "text": text,
+            "model_id": "eleven_monolingual_v1",
+            "voice_settings": {
+                "stability": 0.5,
+                "similarity_boost": 0.5
+            }
+        }
+        response = requests.post(elevenlabs_url, json=data, headers=headers)
+
+        temp_dir = os.path.join("temp", str(uuid.uuid4()))
+        os.makedirs(temp_dir, exist_ok=True)
+
+        mp3_path = os.path.join(temp_dir, 'temp.mp3')
+        with open(mp3_path, 'wb') as f:
+            f.write(response.content)
+
+        args.audio = mp3_path
+        outfile_path = main(temp_dir)
+
+        response = {"status": "success", "outfile": outfile_path}
     except Exception as e:
         response = {"status": "failed", "error": str(e)}
 
@@ -304,6 +311,13 @@ def synthesize():
     resp.status_code = 200
     return resp
 
+@app.route('/results/<filename>', methods=['GET'])
+def get_result(filename):
+    try:
+        return send_from_directory('results', filename)
+    except Exception as e:
+        return jsonify({"status": "failed", "error": str(e)}), 404
+
 if __name__ == '__main__':
     model = load_model(args.checkpoint_path)
-    app.run(host='0.0.0.0', port=1206)
+    app.run(host='0.0.0.0', port=8888)
