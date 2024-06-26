@@ -18,7 +18,7 @@ app = Flask(__name__)
 
 class Args:
     def __init__(self):
-        self.checkpoint_path = "checkpoints/wav2lip_gan.pth"
+        self.checkpoint_path = "/workspace/Wav2Lip/checkpoints/wav2lip_gan.pth"
         self.face = ""
         self.audio = ""
         self.static = False
@@ -36,7 +36,7 @@ class Args:
 args = Args()
 
 global model
-model_path = "checkpoints/wav2lip_gan.pth"
+model_path = args.checkpoint_path
 
 if os.path.isfile(args.face) and args.face.split('.')[1] in ['jpg', 'png', 'jpeg']:
     args.static = True
@@ -256,7 +256,7 @@ def main(temp_dir):
     out.release()
 
     unique_outfile = f'results/result_voice_{uuid.uuid4().hex}.mp4'
-    command = f'ffmpeg -y -i {args.audio} -i {temp_video_path} -strict -2 -q:v 1 {unique_outfile}'
+    command = f'ffmpeg -y -i {args.audio} -i {temp_video_path} -strict -2 -q:v 1 /workspace/Wav2Lip/{unique_outfile}'
     subprocess.call(command, shell=platform.system() != 'Windows')
 
     shutil.rmtree(temp_dir)
@@ -268,16 +268,36 @@ def synthesize():
     global model
     try:
         req = request.get_json(force=True)
-        if args.checkpoint_path != req.get('checkpoint_path', ''):
-            args.checkpoint_path = req.get('checkpoint_path', '')
-            model = load_model(args.checkpoint_path)
-        args.face = req.get('face', '')
+        args.face = '/workspace/Wav2Lip/' + req.get('face', '')
         text = req.get('text', '')
+        settings = req.get('wav2lip_settings', {})
+
+        # Настройки по умолчанию для tts_settings
+        default_tts_settings = {
+            'model_id': 'eleven_monolingual_v1',
+            'voice_id': '21m00Tcm4TlvDq8ikWAM',
+            'voice_settings': {
+                'stability': 0.5,
+                'similarity_boost': 0.5
+            }
+        }
+        # Обновляем настройки из запроса
+        tts_settings = req.get('tts_settings', {})
+        # Объединяем значения по умолчанию с переданными настройками
+        combined_tts_settings = {**default_tts_settings, **tts_settings}
+        # Обеспечиваем, что voice_settings также объединяются правильно
+        combined_tts_settings['voice_settings'] = {**default_tts_settings['voice_settings'], **tts_settings.get('voice_settings', {})}
+
+        # Обновление параметров на основе запроса
+        for key, value in settings.items():
+            if hasattr(args, key):
+                setattr(args, key, value)
+
         if not text:
             raise ValueError('No text')
 
         # Отправить текст в API от Elevenlabs и получить MP3
-        elevenlabs_url = "https://api.elevenlabs.io/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM"
+        elevenlabs_url = "https://api.elevenlabs.io/v1/text-to-speech/{}".format(combined_tts_settings['voice_id'])
         headers = {
             "Accept": "audio/mpeg",
             "Content-Type": "application/json",
@@ -285,15 +305,12 @@ def synthesize():
         }
         data = {
             "text": text,
-            "model_id": "eleven_monolingual_v1",
-            "voice_settings": {
-                "stability": 0.5,
-                "similarity_boost": 0.5
-            }
+            "model_id": combined_tts_settings['model_id'],
+            "voice_settings": combined_tts_settings['voice_settings']
         }
         response = requests.post(elevenlabs_url, json=data, headers=headers)
 
-        temp_dir = os.path.join("temp", str(uuid.uuid4()))
+        temp_dir = os.path.join("/workspace/Wav2Lip/temp", str(uuid.uuid4()))
         os.makedirs(temp_dir, exist_ok=True)
 
         mp3_path = os.path.join(temp_dir, 'temp.mp3')
@@ -303,7 +320,7 @@ def synthesize():
         args.audio = mp3_path
         outfile_path = main(temp_dir)
 
-        response = {"status": "success", "outfile": outfile_path}
+        response = {"status": "success", "outfile": "https://gokzgtej61cdq3-8888.proxy.runpod.net/" + outfile_path}
     except Exception as e:
         response = {"status": "failed", "error": str(e)}
 
@@ -314,10 +331,10 @@ def synthesize():
 @app.route('/results/<filename>', methods=['GET'])
 def get_result(filename):
     try:
-        return send_from_directory('results', filename)
+        return send_from_directory('/workspace/Wav2Lip/results', filename)
     except Exception as e:
         return jsonify({"status": "failed", "error": str(e)}), 404
 
 if __name__ == '__main__':
-    model = load_model(args.checkpoint_path)
+    model = load_model(model_path)
     app.run(host='0.0.0.0', port=8888)
