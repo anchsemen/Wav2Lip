@@ -169,6 +169,7 @@ def get_preds_fromhm(hm, center=None, scale=None):
 
     return preds, preds_orig
 
+
 def get_preds_fromhm_batch(hm, centers=None, scales=None):
     """Obtain (x,y) coordinates given a set of N heatmaps. If the centers
     and the scales is provided the function will return the points also in
@@ -208,6 +209,7 @@ def get_preds_fromhm_batch(hm, centers=None, scales=None):
                     preds[i, j], centers[i], scales[i], hm.size(2), True)
 
     return preds, preds_orig
+
 
 def shuffle_lr(parts, pairs=None):
     """Shuffle the points left-right according to the axis of symmetry

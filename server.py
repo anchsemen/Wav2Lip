@@ -1,24 +1,29 @@
-from flask import Flask, request, jsonify, send_from_directory
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse
+from pathlib import Path
+import httpx
 import os
 import cv2
 import subprocess
 import platform
 import numpy as np
 import torch
-import requests
 from tqdm import tqdm
 from models import Wav2Lip
-from datetime import datetime
 import uuid
 import shutil
+
 import audio  # Импортируем модуль audio
 import face_detection  # Импортируем модуль face_detection
+import uvicorn
 
-app = Flask(__name__)
+app = FastAPI()
+
 
 class Args:
     def __init__(self):
-        self.checkpoint_path = "/workspace/Wav2Lip/checkpoints/wav2lip_gan.pth"
+        # self.checkpoint_path = "/workspace/Wav2Lip/checkpoints/wav2lip_gan.pth"
+        self.checkpoint_path = "checkpoints/wav2lip_gan.pth"
         self.face = ""
         self.audio = ""
         self.static = False
@@ -33,6 +38,7 @@ class Args:
         self.nosmooth = False
         self.img_size = 96
 
+
 args = Args()
 
 global model
@@ -40,6 +46,7 @@ model_path = args.checkpoint_path
 
 if os.path.isfile(args.face) and args.face.split('.')[1] in ['jpg', 'png', 'jpeg']:
     args.static = True
+
 
 def get_smoothened_boxes(boxes, T):
     for i in range(len(boxes)):
@@ -49,6 +56,7 @@ def get_smoothened_boxes(boxes, T):
             window = boxes[i: i + T]
         boxes[i] = np.mean(window, axis=0)
     return boxes
+
 
 def face_detect(images):
     detector = face_detection.FaceAlignment(face_detection.LandmarksType._2D, flip_input=False, device=device)
@@ -60,7 +68,8 @@ def face_detect(images):
                 predictions.extend(detector.get_detections_for_batch(np.array(images[i:i + batch_size])))
         except RuntimeError:
             if batch_size == 1:
-                raise RuntimeError('Image too big to run face detection on GPU. Please use the --resize_factor argument')
+                raise RuntimeError(
+                    'Image too big to run face detection on GPU. Please use the --resize_factor argument')
             batch_size //= 2
             print('Recovering from OOM error; New batch size: {}'.format(batch_size))
             continue
@@ -84,11 +93,13 @@ def face_detect(images):
         results.append([x1, y1, x2, y2])
 
     boxes = np.array(results)
-    if not args.nosmooth: boxes = get_smoothened_boxes(boxes, T=5)
+    if not args.nosmooth:
+        boxes = get_smoothened_boxes(boxes, T=5)
     results = [[image[y1: y2, x1:x2], (y1, y2, x1, x2)] for image, (x1, y1, x2, y2) in zip(images, boxes)]
 
     del detector
     return results
+
 
 def datagen(frames, mels):
     img_batch, mel_batch, frame_batch, coords_batch = [], [], [], []
@@ -138,9 +149,11 @@ def datagen(frames, mels):
 
         yield img_batch, mel_batch, frame_batch, coords_batch
 
+
 mel_step_size = 16
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 print('Using {} for inference.'.format(device))
+
 
 def _load(checkpoint_path):
     if device == 'cuda':
@@ -149,18 +162,6 @@ def _load(checkpoint_path):
         checkpoint = torch.load(checkpoint_path, map_location=lambda storage, loc: storage)
     return checkpoint
 
-def load_model(path):
-    global model
-    model = Wav2Lip()
-    print("Load checkpoint from: {}".format(path))
-    checkpoint = _load(path)
-    s = checkpoint["state_dict"]
-    new_s = {}
-    for k, v in s.items():
-        new_s[k.replace('module.', '')] = v
-    model.load_state_dict(new_s)
-    model = model.to(device)
-    return model.eval()
 
 def main(temp_dir):
     global model
@@ -190,8 +191,10 @@ def main(temp_dir):
                 frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
 
             y1, y2, x1, x2 = args.crop
-            if x2 == -1: x2 = frame.shape[1]
-            if y2 == -1: y2 = frame.shape[0]
+            if x2 == -1:
+                x2 = frame.shape[1]
+            if y2 == -1:
+                y2 = frame.shape[0]
 
             frame = frame[y1:y2, x1:x2]
 
@@ -207,7 +210,6 @@ def main(temp_dir):
         command = f'ffmpeg -y -i {args.audio} -strict -2 {temp_audio_path}'
         subprocess.call(command, shell=True)
         args.audio = temp_audio_path
-
     wav = audio.load_wav(args.audio, 16000)
     mel = audio.melspectrogram(wav)
     print(mel.shape)
@@ -227,13 +229,12 @@ def main(temp_dir):
         i += 1
 
     print("Length of mel chunks: {}".format(len(mel_chunks)))
-
     full_frames = full_frames[:len(mel_chunks)]
 
     batch_size = args.wav2lip_batch_size
     gen = datagen(full_frames.copy(), mel_chunks)
-
-    for i, (img_batch, mel_batch, frames, coords) in enumerate(tqdm(gen, total=int(np.ceil(float(len(mel_chunks)) / batch_size)))):
+    for i, (img_batch, mel_batch, frames, coords) in enumerate(
+            tqdm(gen, total=int(np.ceil(float(len(mel_chunks)) / batch_size)))):
         if i == 0:
             frame_h, frame_w = full_frames[0].shape[:-1]
             out = cv2.VideoWriter(temp_video_path, cv2.VideoWriter_fourcc(*'DIVX'), fps, (frame_w, frame_h))
@@ -252,26 +253,26 @@ def main(temp_dir):
 
             f[y1:y2, x1:x2] = p
             out.write(f)
-
     out.release()
-
     unique_outfile = f'results/result_voice_{uuid.uuid4().hex}.mp4'
-    command = f'ffmpeg -y -i {args.audio} -i {temp_video_path} -strict -2 -q:v 1 /workspace/Wav2Lip/{unique_outfile}'
+    command = f'ffmpeg -y -i {args.audio} -i {temp_video_path} -strict -2 -q:v 1 C:/Users/anchs/PycharmProjects/Wav2Lip/{unique_outfile}'
+    # command = f'ffmpeg -y -i {args.audio} -i {temp_video_path} -strict -2 -q:v 1 /workspace/Wav2Lip/{unique_outfile}'
     subprocess.call(command, shell=platform.system() != 'Windows')
 
     shutil.rmtree(temp_dir)
 
     return unique_outfile
 
-@app.route('/synthesize', methods=['POST'])
-def synthesize():
+
+@app.post('/synthesize')
+async def synthesize(request: Request):
     global model
     try:
-        req = request.get_json(force=True)
-        args.face = '/workspace/Wav2Lip/' + req.get('face', '')
+        req = await request.json()
+        args.face = 'C:/Users/anchs/PycharmProjects/Wav2Lip/characters/' + req.get('face', '')
+        # args.face = '/workspace/Wav2Lip/' + req.get('face', '')
         text = req.get('text', '')
         settings = req.get('wav2lip_settings', {})
-
         # Настройки по умолчанию для tts_settings
         default_tts_settings = {
             'model_id': 'eleven_monolingual_v1',
@@ -284,10 +285,9 @@ def synthesize():
         # Обновляем настройки из запроса
         tts_settings = req.get('tts_settings', {})
         # Объединяем значения по умолчанию с переданными настройками
-        combined_tts_settings = {**default_tts_settings, **tts_settings}
-        # Обеспечиваем, что voice_settings также объединяются правильно
-        combined_tts_settings['voice_settings'] = {**default_tts_settings['voice_settings'], **tts_settings.get('voice_settings', {})}
-
+        combined_tts_settings = {**default_tts_settings, **tts_settings,
+                                 'voice_settings': {**default_tts_settings['voice_settings'],
+                                                    **tts_settings.get('voice_settings', {})}}
         # Обновление параметров на основе запроса
         for key, value in settings.items():
             if hasattr(args, key):
@@ -295,7 +295,6 @@ def synthesize():
 
         if not text:
             raise ValueError('No text')
-
         # Отправить текст в API от Elevenlabs и получить MP3
         elevenlabs_url = "https://api.elevenlabs.io/v1/text-to-speech/{}".format(combined_tts_settings['voice_id'])
         headers = {
@@ -308,33 +307,55 @@ def synthesize():
             "model_id": combined_tts_settings['model_id'],
             "voice_settings": combined_tts_settings['voice_settings']
         }
-        response = requests.post(elevenlabs_url, json=data, headers=headers)
-
-        temp_dir = os.path.join("/workspace/Wav2Lip/temp", str(uuid.uuid4()))
+        async with httpx.AsyncClient() as client:
+            response = await client.post(elevenlabs_url, json=data, headers=headers)
+        temp_dir = os.path.join("C:/Users/anchs/PycharmProjects/Wav2Lip/temp", str(uuid.uuid4()))
+        # temp_dir = os.path.join("/workspace/Wav2Lip/temp", str(uuid.uuid4()))
         os.makedirs(temp_dir, exist_ok=True)
 
         mp3_path = os.path.join(temp_dir, 'temp.mp3')
         with open(mp3_path, 'wb') as f:
             f.write(response.content)
-
         args.audio = mp3_path
         outfile_path = main(temp_dir)
-
-        response = {"status": "success", "outfile": "https://gokzgtej61cdq3-8888.proxy.runpod.net/" + outfile_path}
+        response_data = {"status": "success", "outfile": "https://gokzgtej61cdq3-8888.proxy.runpod.net/" + outfile_path}
     except Exception as e:
-        response = {"status": "failed", "error": str(e)}
+        response_data = {"status": "failed", "error": str(e)}
 
-    resp = jsonify(response)
-    resp.status_code = 200
-    return resp
+    return response_data
 
-@app.route('/results/<filename>', methods=['GET'])
-def get_result(filename):
+
+@app.get('/results/<filename>')
+async def get_result(filename):
     try:
-        return send_from_directory('/workspace/Wav2Lip/results', filename)
-    except Exception as e:
-        return jsonify({"status": "failed", "error": str(e)}), 404
+        # directory = Path('/workspace/Wav2Lip/results')
+        directory = Path("C:/Users/anchs/PycharmProjects/FastAPIWav2Lip/results")
+        file_path = directory / filename
 
-if __name__ == '__main__':
+        if not file_path.exists():
+            raise HTTPException(status_code=404, detail="File not found")
+
+        return FileResponse(str(file_path))
+    except Exception as e:
+        return {"status": "failed", "error": str(e)}
+
+
+def load_model(path):
+    global model
+    model = Wav2Lip()
+    print("Load checkpoint from: {}".format(path))
+    checkpoint = _load(path)
+    s = checkpoint["state_dict"]
+    new_s = {}
+    for k, v in s.items():
+        new_s[k.replace('module.', '')] = v
+    model.load_state_dict(new_s)
+    model = model.to(device)
+    return model.eval()
+
+
+if __name__ == "__main__":
     model = load_model(model_path)
-    app.run(host='0.0.0.0', port=8888)
+    host = os.getenv("HOST", "127.0.0.1")
+    port = int(os.getenv("PORT", "7999"))
+    uvicorn.run(app, host=host, port=port)
